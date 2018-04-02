@@ -1,33 +1,186 @@
 ﻿using System;
+using System.Threading;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-
 
 namespace AltThread
 {
-    public class ThreadController
+    public class ThreadNet
     {
-        public ThreadController(
-            ThreadControllerConfig Config
-        )
-        {
+        // A place to send us requests 'posts'
+        // Each thread should have a reference to its own sendqueue(true)
+        // 
+        private static Dictionary<uint, ThreadStash> ThreadStore;
+        // Tell us where to look for the next place posted to
+        private static BlockingCollection<uint> ThreadCommit = new BlockingCollection<uint>();
+        // A reference to ourself - may not be required
+        private static ThreadNet ThreadNetCoreObj;
 
+        // A run space for ourself
+        private ThreadSet ThreadSet = new ThreadSet();
+        private uint ThreadID = 0;
+
+        // Constructor - Get the initial working core ready
+        public ThreadNet(ThreadNodeConfig Config)
+        {
+            ThreadSet.ThreadConfig = Config;
+            ThreadSet.ThreadStartRef = new ParameterizedThreadStart(ThreadNetCore);
+            ThreadSet.ThreadRef = new Thread(ThreadSet.ThreadStartRef);
         }
 
+        // Start the main processing loop for message passing
+        public static void Start(ThreadNet Tnet)
+        {
+            ThreadNetCoreObj = (ThreadNet)Tnet;
+            ThreadStore = new Dictionary<uint, ThreadStash>();
+            ThreadNetCoreObj.ThreadSet.ThreadRef.Start(ThreadStore);
+        }
+
+        // The actual message passing core, no reason we could not run
+        // Multiple of these in high demand systems?
+        private void ThreadNetCore(object CoreRef)
+        {
+           while(true)
+            {
+                uint FocusStack = ThreadCommit.Take();
+                Console.WriteLine("Core Active ("+ FocusStack + ") SIZE: "+ThreadStore[FocusStack].SendQueue.Count);
+            }
+        }
+
+        private uint NextID ()
+        {
+            ThreadID = (ThreadID + 1);
+            return ThreadID;
+        }
+
+        public uint Child(Action<object> FunctionRef)
+        {
+            // Create a place for its queues
+            uint ChildID = NextID();
+            lock (ThreadStore)
+            {
+                ThreadStore.Add(
+                    ThreadID,
+                    new ThreadStash(FunctionRef)
+                );
+            }
+            ThreadStore[ChildID].ID(ChildID);
+
+            // Start a thread for this child
+            ThreadStore[ChildID].QueueRef = ThreadCommit;
+            ThreadStore[ChildID].Worker.ThreadStartRef = new ParameterizedThreadStart(ThreadWorker);
+            ThreadStore[ChildID].Worker.ThreadRef = new Thread(ThreadStore[ChildID].Worker.ThreadStartRef);
+            ThreadStore[ChildID].Worker.ThreadRef.Start(ThreadStore[ChildID]);
+
+            return ChildID;
+        }
+
+        public static void ThreadWorker(object Stack)
+        {
+            ThreadStash MyStack = (ThreadStash)Stack;
+
+            while (true)
+            {
+                MyStack.Function(
+                    new ThreadPacket(2, "test", "string", ThreadStore[MyStack.ID()])
+                );
+                Thread.Sleep(1000);
+            }
+        }
+
+        public class ThreadStash
+        {
+            public ConcurrentQueue<ThreadPacket> SendQueue = new ConcurrentQueue<ThreadPacket>();
+            public ThreadSet Worker = new ThreadSet();
+            private uint MyID;
+            public readonly Action<object> MyFunction;
+            public BlockingCollection<uint> QueueRef { get; set; }
+
+            public void Enqueue(ThreadPacket Data)
+            {
+                Data.Sender = MyID;
+                
+                lock (SendQueue)
+                {
+                    SendQueue.Enqueue(Data);
+                }
 
 
+                // Need to add this to hint to the core what to look at
+                ThreadCommit.Add(MyID);
+            }
+            public ThreadStash(Action<object> functionRef)
+            {
+                this.MyFunction = functionRef;
+            }
+            public void Function(object Packet)
+            {
+                this.MyFunction(Packet);
+            }
+            public void ID(uint SetID)
+            {
+                if (Convert.ToBoolean(MyID) == false) { MyID = SetID; }
+                else { MyID = SetID; }
+            }
+            public uint ID() { return MyID; }
+        }
     }
 
-    public class ThreadControllerConfig
+    public class ThreadPacket
     {
-        public string Name { get; internal set; }
+        public uint Target { get; set; }
+        public uint Sender { get; set; }
+        public object Payload { get; set; }
+        public string Type { get; set; }
+        private ThreadNet.ThreadStash Queue;
+
+        public ThreadPacket(
+            uint SetTarget,
+            object SetObject,
+            string SetType,
+            ThreadNet.ThreadStash SetQueue
+        )
+        {
+            Target = SetTarget;
+            Payload = SetObject;
+            Type = SetType;
+            Queue = SetQueue;
+        }
+
+        public ThreadPacket(
+            uint SetTarget,
+            object SetObject,
+            string SetType
+        )
+        {
+            Target = SetTarget;
+            Payload = SetObject;
+            Type = SetType;
+        }
+
+        public void Post(
+            uint SetTarget,
+            object SetPayload,
+            string SetType
+        )
+        {
+            lock (Queue)
+            {
+                Queue.Enqueue(
+                    new ThreadPacket(SetTarget, SetPayload, SetType)
+                );
+            }
+        }
     }
-
-    public class UniversalDataBus
+    public class ThreadNodeConfig
     {
-
+        public string Name { get; set; }
+        public Action<object> Handler { get; set; }
+    }
+    public class ThreadSet
+    {
+        public Thread ThreadRef { get; set; }
+        public ParameterizedThreadStart ThreadStartRef { get; set; }
+        public ThreadNodeConfig ThreadConfig { get; set; }
     }
 }
