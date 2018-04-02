@@ -10,25 +10,35 @@ namespace AltThreadExample
         {
             // When a threadnet is created it automatically detaches from what created it
             // main() will continue to process.
-            ThreadNet Tnet = new ThreadNet(
-                new ThreadNodeConfig()
-                {
-                    Name = "TestNetwork",
-                }
-            );
-            ThreadNet.Start(Tnet);
+            AltThreadKernel Tnet1 = new AltThreadKernel();
+            Tnet1.Start(Tnet1);
+            Tnet1.Child(Handler1);
+            Tnet1.Child(Handler1);
 
-            Tnet.Child(Handler1);
+            AltThreadKernel Tnet2 = new AltThreadKernel();
+            Tnet2.Start(Tnet2);
+            Tnet2.Child(Handler1);
 
-            Thread.Sleep(1000 * 60);
+            Tnet1.Post(1, "string", "test");
+            Tnet2.Post(1, "string", "test");
+
+            while(true)
+            {
+                Thread.Sleep(1000);
+            }
         }
 
-        private static void Handler1(object PacketIN)
+        
+        private static void Handler1(Object PacketIN)
         {
-            ThreadPacket Packet = (ThreadPacket)PacketIN;
+            AltThreadPacket Packet = (AltThreadPacket)PacketIN;
 
-            Console.WriteLine("Releasing test packet");
-            Packet.Post(1, "test post", "string");
+            Console.WriteLine((string)Packet.Payload);
+
+            Thread.Sleep(1000);
+
+            Packet.Post(1, "string", "test post");
         }
+        
     }
 }
