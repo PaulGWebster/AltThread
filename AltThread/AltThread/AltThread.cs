@@ -9,7 +9,7 @@ namespace AltThread
     public class AltThreadKernel
     {
         // A Static memory object 
-        private static Dictionary<string, Dictionary<uint, AltThreadKernelSet>> AltThreadNet = null;
+        private static Dictionary<uint, Dictionary<uint, AltThreadKernelSet>> AltThreadNet = null;
         private static Dictionary<string, uint> AltThreadState = null;
 
         private uint AltThreadInstanceNetworkID = 0;
@@ -20,7 +20,7 @@ namespace AltThread
             // Initilize the primary store if not done so already
             if (AltThreadNet == null)
             {
-                AltThreadNet = new Dictionary<string, Dictionary<uint, AltThreadKernelSet>>();
+                AltThreadNet = new Dictionary<uint, Dictionary<uint, AltThreadKernelSet>>();
                 AltThreadState = new Dictionary<string, uint>() {
                     { "GlobalNetworkID",0 },
                 };
@@ -37,18 +37,18 @@ namespace AltThread
 
             // Add the network by ID to the primary memory store
             // Initilize the new space for the network stack
-            AltThreadNet.Add(NetworkID.ToString(), new Dictionary<uint, AltThreadKernelSet>() );
-            AltThreadNet[NetworkID.ToString()].Add(0,new NetThreadKernelSet());
+            AltThreadNet.Add(NetworkID, new Dictionary<uint, AltThreadKernelSet>() );
+            AltThreadNet[NetworkID].Add(0,new NetThreadKernelSet());
 
             // Initilize the queue hints
-            ((NetThreadKernelSet)AltThreadNet[NetworkID.ToString()][0]).ChildQueueHint = new BlockingCollection<uint>();
+            ((NetThreadKernelSet)AltThreadNet[NetworkID][0]).ChildQueueHint = new BlockingCollection<uint>();
 
             // And the TX/RX
-            AltThreadNet[NetworkID.ToString()][0].TX = new BlockingCollection<AltThreadPacket>();
-            AltThreadNet[NetworkID.ToString()][0].RX = new BlockingCollection<AltThreadPacket>();
+            AltThreadNet[NetworkID][0].TX = new BlockingCollection<AltThreadPacket>();
+            AltThreadNet[NetworkID][0].RX = new BlockingCollection<AltThreadPacket>();
 
             // Create a shortcut to the storage area
-            NetThreadKernelSet KernelSetShortcut = (NetThreadKernelSet)AltThreadNet[NetworkID.ToString()][0];
+            NetThreadKernelSet KernelSetShortcut = (NetThreadKernelSet)AltThreadNet[NetworkID][0];
 
             // Save the kernel
             KernelSetShortcut.Kernel = Tnet;
@@ -70,6 +70,54 @@ namespace AltThread
             return NetworkID;
         }
 
+        // A method for retrieving the next packet from mid function ball
+        public AltThreadPacket Pull()
+        {
+            return Pull(0);
+        }
+        public AltThreadPacket Pull(uint OriginClientID)
+        {
+            if (AltThreadNet[AltThreadInstanceNetworkID][OriginClientID].RX.Count > 0)
+            {
+                return AltThreadNet[AltThreadInstanceNetworkID][OriginClientID].RX.Take();
+            }
+            return null;
+        }
+
+        // Shut down the entire thread network
+        public void Shutdown()
+        {
+            // Shut down all threads first
+            List<uint> DeleteKeys = new List<uint>();
+            foreach (KeyValuePair<uint,AltThreadKernelSet> Val in AltThreadNet[AltThreadInstanceNetworkID])
+            {
+                if (Val.Key != 0)
+                {
+                    DeleteKeys.Add(Val.Key);
+                }
+            }
+            foreach (uint Key in DeleteKeys)
+            {
+                Shutdown(Key);
+            }
+        }
+
+        // Shutdown a client thread
+        public void Shutdown(uint ClientID)
+        {
+            // Send an abort signal to the thread
+            AltThreadNet[AltThreadInstanceNetworkID][ClientID].Thread.Abort();
+
+            // Clear up its work space
+            lock(AltThreadNet[AltThreadInstanceNetworkID])
+            {
+                AltThreadNet[AltThreadInstanceNetworkID][ClientID].TX = null;
+                AltThreadNet[AltThreadInstanceNetworkID][ClientID].RX = null;
+                ((ChildThreadKernelSet)AltThreadNet[AltThreadInstanceNetworkID][ClientID]).Stash.Clear();
+                AltThreadNet[AltThreadInstanceNetworkID].Remove(ClientID);
+            }
+        }
+
         // We do not deal with posts directly from the NET controller
         // Add it to the input queue for whichever thread sent it
         public void Post(uint TargetChildID, string Type, object Payload)
@@ -86,14 +134,21 @@ namespace AltThread
                 Target = TargetChildID,
                 Sender = OriginClientID,
                 Payload = Payload,
-                Type = Type
+                Type = Type,
             };
 
-            // First locate the stack that we are sending from
-            AltThreadNet[NetworkID.ToString()][OriginClientID].TX.Add(Packet);
-
-            // Hint to the network worker that data is ready to be recv'd from this thread
-            ((NetThreadKernelSet)AltThreadNet[NetworkID.ToString()][0]).ChildQueueHint.Add(OriginClientID);
+            // First locate the stack that we are sending from, if it does not exist just drop the packet silently
+            if (AltThreadNet[NetworkID].ContainsKey(TargetChildID))
+            {
+                if (TargetChildID != 0)
+                {
+                    // Update the stash to that of the target, Core does not have a stash
+                    Packet.Stash = ((ChildThreadKernelSet)AltThreadNet[NetworkID][TargetChildID]).Stash;
+                }
+                AltThreadNet[NetworkID][OriginClientID].TX.Add(Packet);
+                // Hint to the network worker that data is ready to be recv'd from this thread
+                ((NetThreadKernelSet)AltThreadNet[NetworkID][0]).ChildQueueHint.Add(OriginClientID);
+            }
         }
 
         // The worker its self, this is multiuse as we always pass it a reference to its
@@ -104,33 +159,34 @@ namespace AltThread
             uint NetworkID = PassedArgs[0];
             uint ChildID = PassedArgs[1];
 
-            string NSID = NetworkID.ToString();
+            Console.WriteLine("Starting network id: {0}, childid: {1}",NetworkID,ChildID);
 
-            AltThreadKernelSet MyStack = AltThreadNet[NSID][ChildID];
+            AltThreadKernelSet MyStack = AltThreadNet[NetworkID][ChildID];
 
             while (true)
             {
                 if (!MyStack.Child)
                 {
                     // We have a blocking notify queue so lets wait for it to do something
-                    uint ClientIDHint = ((NetThreadKernelSet)AltThreadNet[NSID][0]).ChildQueueHint.Take();
+                    uint ClientIDHint = ((NetThreadKernelSet)AltThreadNet[NetworkID][0]).ChildQueueHint.Take();
                     // Ok we got a hint, lets check it out
                     // Does this ID still exist?
-                    if (!AltThreadNet[NSID].ContainsKey(ClientIDHint))
+                    if (!AltThreadNet[NetworkID].ContainsKey(ClientIDHint))
                     {
                         continue;
                     }
                     // Does it have anything in its TX queue?
-                    if (AltThreadNet[NSID][ClientIDHint].TX.Count == 0)
+                    if (AltThreadNet[NetworkID][ClientIDHint].TX.Count == 0)
                     {
                         continue;
                     }
                     // Ok must be good lets get the packet
-                    AltThreadPacket Packet = AltThreadNet[NSID][ClientIDHint].TX.Take();
+                    AltThreadPacket Packet = AltThreadNet[NetworkID][ClientIDHint].TX.Take();
                     // Check the place its going exists, if it does move it there.
-                    if (AltThreadNet[NSID].ContainsKey(Packet.Target))
+                    if (AltThreadNet[NetworkID].ContainsKey(Packet.Target))
                     {
-                        AltThreadNet[NSID][Packet.Target].RX.Add(Packet);
+                        //Packet.Stash = AltThreadNet[NSID][ClientIDHint].
+                        AltThreadNet[NetworkID][Packet.Target].RX.Add(Packet);
                     }
                     // We succesfully moved a packet, now upto the other worker to pick it up!
                 }
@@ -138,32 +194,33 @@ namespace AltThread
                 {
                     // Our job is simply delivery
                     // Grab the packet
-                    AltThreadPacket Packet = AltThreadNet[NSID][ChildID].RX.Take();
-                    // Extract the function reference
-                    ((ChildThreadKernelSet)AltThreadNet[NSID][ChildID]).Function(Packet);
-                }
+                    AltThreadPacket Packet = AltThreadNet[NetworkID][ChildID].RX.Take();
 
-                Console.WriteLine("Core({0}:{1}) running", NetworkID, ChildID);
+                    // Extract the function reference
+                    ((ChildThreadKernelSet)AltThreadNet[NetworkID][ChildID]).Function(Packet);
+                }
+                //Console.WriteLine("Core({0}:{1}) running", NetworkID, ChildID);
             }
 
             // If we got here the thread is exiting, we need to clean the thread space
-            Console.WriteLine("Thread({0}:{1}) exiting..",NetworkID,ChildID);
+            //Console.WriteLine("Thread({0}:{1}) exiting..",NetworkID,ChildID);
         }
 
         // A place to store information about our different threads
         private class AltThreadKernelSet
         {
             public Thread Thread { get; internal set; }
-            public ParameterizedThreadStart ThreadStart { get; internal set; }
             public uint NetworkID { get; internal set; }
             public uint ChildID { get; internal set; }
             public bool Child { get; internal set; }
+            public ParameterizedThreadStart ThreadStart { get; internal set; }
             public BlockingCollection<AltThreadPacket> TX { get; internal set; }
             public BlockingCollection<AltThreadPacket> RX { get; internal set; }
         }
         private class ChildThreadKernelSet : AltThreadKernelSet
         {
             public Action<object> Function { get; internal set; }
+            public Dictionary<string, object> Stash { get; internal set; }
         }
         private class NetThreadKernelSet : AltThreadKernelSet
         {
@@ -187,22 +244,26 @@ namespace AltThread
             {
                 ThreadStart = new ParameterizedThreadStart(AltThreadWorker),
                 ChildID = ChildID,
-                NetworkID = Convert.ToUInt32(NetworkID),
+                NetworkID = this.AltThreadInstanceNetworkID,
                 Child = true,
                 Function = FunctionRef,
                 TX = new BlockingCollection<AltThreadPacket>(),
                 RX = new BlockingCollection<AltThreadPacket>(),
+                Stash = new Dictionary<string, object>()
             };
 
             // And generate the thread its self
             ChildSet.Thread = new Thread(ChildSet.ThreadStart);
 
             // Add the thread to the global store
-            AltThreadNet[NetworkID].Add(ChildID, ChildSet);
+            AltThreadNet[this.AltThreadInstanceNetworkID].Add(ChildID, ChildSet);
 
             // Start the child
             ChildSet.Thread.Start(new uint[] { ChildSet.NetworkID, ChildID });
-            
+
+            // Set the name of the thread to be
+            ChildSet.Thread.Name = ChildID.ToString();
+
             // Return the ChildID only
             return ChildID;
         }
@@ -214,10 +275,19 @@ namespace AltThread
         public uint Sender { get; internal set; }
         public object Payload { get; internal set; }
         public string Type { get; internal set; }
+        public Dictionary<string,object> Stash { get; internal set;  }
         public new void Post(uint TargetChildID, string Type, object Payload)
         {
-            // We need to know the client origin ID somehow?!
-            this.Post(TargetChildID, Type, Payload, OriginClientID);
+            this.Post(TargetChildID, Type, Payload, this.Target);
+        }
+        public new AltThreadPacket Pull()
+        {
+            return this.Pull(this.Target);
+        }
+        public new void Shutdown()
+        {
+            this.Shutdown(this.Target);
         }
     }
 }
+
