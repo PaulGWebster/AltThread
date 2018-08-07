@@ -6,6 +6,8 @@ namespace AltThreadExample
 {
     class Program
     {
+        private static Random rnd = new Random();
+
         static void Main(string[] args)
         {
             // When a threadnet is created it automatically detaches from what created it
@@ -32,28 +34,11 @@ namespace AltThreadExample
         {
             AltThreadPacket Packet = (AltThreadPacket)PacketIN;
 
-            Thread.Sleep(1000);
+            Console.WriteLine("{1} -> {0}", Packet.Target, Packet.Sender);
 
-            // Add whatever we got in payload to our stash, pass the double of it back to the next worker
-            if (Packet.Stash.ContainsKey("Spot"))
-            {
-                Packet.Stash["Spot"] = Packet.Stash["Spot"] + (string)Packet.Payload;
-            }
-            else
-            {
-                Packet.Stash.Add("Spot", (string)Packet.Payload);
-            }
+            Thread.Sleep(100);
+            Packet.Post((uint)rnd.Next(1, 5), "tag", "");
 
-            Console.WriteLine("Client({0}) stash: ({1})", Packet.Target, Packet.Stash["Spot"]);
-
-            if (Packet.Target == 4) {
-                Packet.Post(1, "tag", Packet.Stash["Spot"]);
-                Packet.Shutdown();
-            }
-            else
-            {
-                Packet.Post(Packet.Target + 1, "tag", Packet.Stash["Spot"]);
-            }
         }
     }
 }
